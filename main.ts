@@ -29,7 +29,7 @@
 // 4 trades, max drawdown -2.31% (vs buy-and-hold -$44.01, rsi-bollinger
 // -$57.37 on the same window).
 
-import { BPS, runBars, type Bar, type BarsState, type BuyInput, type SellInput } from './vendor/makefun-bars.ts';
+import { runBars, type Bar, type BarsState, type BuyInput, type SellInput } from './vendor/makefun-bars.ts';
 
 // ---- tunables (chosen on the dev window; see the header for why) ----
 const RSI_LEN = 14;
@@ -44,7 +44,6 @@ const TP_DEN = 1000;
 const SL_NUM = 985; // stop loss: value <= 98.5% of cost
 const SL_DEN = 1000;
 const TIME_STOP = 300; // bars
-const MAX_DD_BPS = 500; // equity circuit breaker: stop entering after -5% from peak
 const MAX_SLIPPAGE_BPS = 100;
 
 const SYMBOL = 'CBBTC';
@@ -133,7 +132,7 @@ await runBars({
     const dd = (runningHigh - close) / runningHigh;
     const late = trades === 0 && state.seq > LATE_BAR;
     if (dd <= (late ? LATE_DD_MIN : DD_MIN)) return []; // not a deep enough washout
-    if (state.equity * BigInt(BPS) < peakEquity * BigInt(BPS - MAX_DD_BPS)) return []; // circuit breaker
+    if (state.equity * 10000n < peakEquity * 9500n) return []; // circuit breaker: -5% from peak equity
     const byWeight = state.weight_room(SYMBOL);
     let slice = state.cash; // full size: one position, all of it
     if (slice > byWeight) slice = byWeight;
