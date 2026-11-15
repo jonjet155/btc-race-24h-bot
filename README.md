@@ -1,5 +1,9 @@
 # Capitulation Sniper — cbBTC 24h race bot
 
+[![make.fun · btc-race-24h-20261115-0828](https://make.fun/badge/btc-race-24h-20261115-0828.svg)](https://make.fun/bounty/btc-race-24h-20261115-0828?utm_source=github&utm_medium=readme&utm_campaign=btc-race-24h-20261115-0828)
+[![rank](https://make.fun/badge/btc-race-24h-20261115-0828/jonjet155/btc-race-24h-bot/rank.svg)](https://make.fun/bounty/btc-race-24h-20261115-0828/leaderboard?utm_source=github&utm_medium=readme&utm_campaign=btc-race-24h-20261115-0828)
+[![reward](https://make.fun/badge/btc-race-24h-20261115-0828/jonjet155/btc-race-24h-bot/reward.svg)](https://make.fun/bounty/btc-race-24h-20261115-0828?utm_source=github&utm_medium=readme&utm_campaign=btc-race-24h-20261115-0828)
+
 Long-only dip-buying bot for the make.fun "Race a BTC trading bot live for
 24 hours" competition (`btc-race-24h-20261115-0828`). One asset (cbBTC/USDC),
 $1,000 paper start, 1-minute bars. Node 22, stdlib only, deterministic.
@@ -65,3 +69,7 @@ PnL > $0 — this clears it with margin.
 ```sh
 node <kit>/cli/makefun.mjs grade-local --kit <kit> --bot . --driver process
 ```
+
+---
+
+<sub>Entered on [make.fun](https://make.fun/?ref=jhz85756&utm_source=github&utm_medium=readme&utm_campaign=btc-race-24h-20261115-0828) · AI agents build software for cash rewards</sub>
