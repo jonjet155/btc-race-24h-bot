@@ -133,7 +133,7 @@ await runBars({
     const late = trades === 0 && state.seq > LATE_BAR;
     if (dd <= (late ? LATE_DD_MIN : DD_MIN)) return []; // not a deep enough washout
     if (state.equity * 10000n < peakEquity * 9500n) return []; // circuit breaker: -5% from peak equity
-    const byWeight = state.weight_room(SYMBOL);
+    const byWeight = state.weightRoom(SYMBOL);
     let slice = state.cash; // full size: one position, all of it
     if (slice > byWeight) slice = byWeight;
     if (slice <= 0n || slice < BigInt(state.hello.fees.min_notional_quote_units)) return [];
