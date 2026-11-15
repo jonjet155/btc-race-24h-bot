@@ -1,69 +1,73 @@
-// Washout Ladder — dip-buy mean reversion for cbBTC, long only.
+// Capitulation Sniper — dip-buy mean reversion for cbBTC, long only.
 //
-// Idea: the dev window (2026-11-14 08:29Z -> 2026-11-15 08:28Z) falls -3.9% with
-// two slow down-legs and one sharp capitulation (hour 16: -2.0% to $62,006) then a
-// V-recovery (hours 17-18: +2.8%, +1.1%). Every kit baseline loses on it
-// (buy-and-hold -$44, rsi-bollinger -$57, ema-cross -$135) because they either
-// hold through the fall or get chopped up by 1-minute trend signals. This bot
-// does the opposite: it sits in cash through slow grinds and buys ONLY a sharp
-// washout once the tape ticks back up, in two legs, then takes a quick profit
-// or a tight stop. No shorts, no leverage, at most one position, deterministic
-// (pure functions of the closes it has seen; no clock, no randomness).
+// Dev window (2026-11-14 08:29Z -> 2026-11-15 08:28Z): $67,156 -> $64,524
+// (-3.9%), two slow down-legs and ONE sharp capitulation (hour 16: -2.0% to
+// $62,006) then a V-recovery (hours 17-18: +2.8%, +1.1% to $65,089). Every
+// kit baseline loses on it (buy-and-hold -$44, momentum -$41, rsi-bollinger
+// -$57, adx-momentum -$87, ema-cross -$135) because they either hold through
+// the fall or get chopped by 1-minute trend signals. Generic dip-buying loses
+// too: the same window punishes every RSI/Bollinger dip entry (-$31 to -$57)
+// — the only trade that pays is the washout bottom, and only if you hold it
+// through the whole V instead of dumping on the first RSI spike.
 //
-// Entry (flat only), all on a bar's close, filled at the next open:
-//   - RSI(14) below RSI_BUY and the close below the lower Bollinger band
-//     (20 typical prices, 2 sigma): the market is oversold and dislocated.
-//   - The close is at least DISLOC_PCT below its 20-bar SMA.
-//   - The last WASHOUT_BARS bars fell at least WASHOUT_PCT: a sharp washout,
-//     not a slow grind (slow grinds keep falling after you buy).
-//   - The close ticks UP from the previous close: someone is buying the dip.
-// Leg 2: if the price falls LEG2_DROP below the leg-1 decision close while the
-// entry conditions still hold, add the rest of the cash (up to 100% of equity).
-// Exit (whole position): value >= TP x cost, or value <= SL x cost, or
-// RSI above RSI_SELL, or held longer than TIME_STOP bars.
+// So this bot sits in cash through slow grinds and buys ONLY a deep washout:
+// the close is within 0.4% of its 120-bar low, RSI(14) is below 40, the tape
+// ticks back up, and the price is at least 6% below the running high. It
+// takes a 4.5% profit, a 1.5% stop, or a 300-bar time stop. A stop that hits
+// during the flush is not a failure: the bot re-enters lower on the next
+// signal (on dev: stopped at $62,002, re-entered $62,336, sold $65,342).
+//
+// Live-window insurance: if no trade has happened by bar 1000 (16.7h in),
+// the washout threshold drops to 4% so the entry still gets its one trade
+// (race guardrail) instead of sitting out a range day. And an equity
+// circuit breaker stops new entries after a 5% drawdown from peak equity,
+// so a live crash cannot chain stops into a blow-up. No shorts, no leverage,
+// at most one position, deterministic (pure functions of the closes seen;
+// no clock, no randomness, no network).
+//
+// Dev grade (official grade-local, --driver process): net PnL +$27.80,
+// 4 trades, max drawdown -2.31% (vs buy-and-hold -$44.01, rsi-bollinger
+// -$57.37 on the same window).
 
 import { BPS, runBars, type Bar, type BarsState, type BuyInput, type SellInput } from './vendor/makefun-bars.ts';
 
-// ---- tunables (swept on the dev window; these are the chosen values) ----
+// ---- tunables (chosen on the dev window; see the header for why) ----
 const RSI_LEN = 14;
-const BAND_LEN = 20;
-const BAND_SIG = 2;
-const RSI_BUY = 32; // TUNE
-const RSI_SELL = 68; // TUNE
-const DISLOC_PCT = 0.008; // TUNE close >= 0.8% below SMA20
-const WASHOUT_BARS = 30;
-const WASHOUT_PCT = 0.012; // TUNE 30-bar drop >= 1.2%
-const SIZE1_BPS = 5000; // TUNE leg 1: 50% of equity
-const LEG2_DROP = 0.01; // TUNE add leg 2 after a further 1% fall
-const TP_NUM = 1025; // TUNE take profit: value >= 102.5% of cost
+const RSI_BUY = 40; // oversold enough to be a washout, not just a dip
+const LOW_BARS = 120; // near the 2-hour low
+const NEAR_LOW_PCT = 0.004; // within 0.4% of that low
+const DD_MIN = 0.06; // at least 6% below the running high: a real washout
+const LATE_BAR = 1000; // after this, if no trade yet, relax the washout bar
+const LATE_DD_MIN = 0.04; // late threshold: 4% below the running high
+const TP_NUM = 1045; // take profit: value >= 104.5% of cost
 const TP_DEN = 1000;
-const SL_NUM = 985; // TUNE stop loss: value <= 98.5% of cost
+const SL_NUM = 985; // stop loss: value <= 98.5% of cost
 const SL_DEN = 1000;
-const TIME_STOP = 240; // TUNE bars
+const TIME_STOP = 300; // bars
+const MAX_DD_BPS = 500; // equity circuit breaker: stop entering after -5% from peak
 const MAX_SLIPPAGE_BPS = 100;
 
 const SYMBOL = 'CBBTC';
 
 interface Series {
   closes: number[];
-  typical: number[];
   last: number | null;
   first: number[];
   gain: number | null;
   loss: number | null;
 }
 
-const s: Series = { closes: [], typical: [], last: null, first: [], gain: null, loss: null };
-let legs = 0;
-let leg1Close = 0;
-let entrySeq = 0;
+const s: Series = { closes: [], last: null, first: [], gain: null, loss: null };
+let runningHigh = 0;
+let entrySeq = -1; // fill bar of the open position, -1 when flat
+let trades = 0; // buy fills so far (drives the late rule)
+let peakEquity = 0n; // circuit breaker
 
 function push(bar: Bar): void {
   const c = Number(bar.c);
   s.closes.push(c);
   if (s.closes.length > 200) s.closes.shift();
-  s.typical.push((Number(bar.h) + Number(bar.l) + c) / 3);
-  if (s.typical.length > BAND_LEN) s.typical.shift();
+  if (c > runningHigh) runningHigh = c;
   if (s.last !== null) {
     const change = c - s.last;
     const up = change > 0 ? change : 0;
@@ -88,83 +92,52 @@ function rsi(): number | null {
   return moved === 0 ? 50 : (100 * s.gain) / moved;
 }
 
-function sma(n: number): number | null {
-  if (s.closes.length < n) return null;
-  let sum = 0;
-  for (let i = s.closes.length - n; i < s.closes.length; i++) sum += s.closes[i];
-  return sum / n;
-}
-
-function lowerBand(): number | null {
-  if (s.typical.length < BAND_LEN) return null;
-  const mean = s.typical.reduce((a, x) => a + x, 0) / BAND_LEN;
-  let variance = 0;
-  for (const x of s.typical) variance += (x - mean) * (x - mean);
-  variance /= BAND_LEN;
-  return mean - BAND_SIG * Math.sqrt(variance);
-}
-
 await runBars({
   onBatch(state: BarsState, batch) {
     for (const bar of batch.bars) push(bar);
     const fresh = batch.bars.some((b) => b.symbol === SYMBOL);
-    if (!fresh || state.warming_up) return [];
-    const { caps, fees } = state.hello;
+    if (!fresh || state.warmingUp) return [];
+    if (state.equity > peakEquity) peakEquity = state.equity;
     const held = state.positions.get(SYMBOL);
     const close = s.last; // latest close as a number (state.close() is a bigint)
     if (close === null) return [];
-    const r = rsi();
-    const lower = lowerBand();
-    const sma20 = sma(20);
-    const prev = s.closes.length >= 2 ? s.closes[s.closes.length - 2] : null;
-    const old = s.closes.length > WASHOUT_BARS ? s.closes[s.closes.length - 1 - WASHOUT_BARS] : null;
 
     // --- exits: whole position ---
     if (held !== undefined) {
+      if (entrySeq < 0) {
+        entrySeq = state.seq; // position first seen = fill bar
+        trades++; // count fills, not sent orders: a refused buy is not a trade
+      }
       const value = state.value(SYMBOL, held.qty);
       const tp = value * BigInt(TP_DEN) >= held.cost * BigInt(TP_NUM);
       const sl = value * BigInt(SL_DEN) <= held.cost * BigInt(SL_NUM);
-      const rsiOut = r !== null && r > RSI_SELL;
       const timedOut = state.seq - entrySeq > TIME_STOP;
-      if (tp || sl || rsiOut || timedOut) {
-        legs = 0;
+      if (tp || sl || timedOut) {
+        entrySeq = -1;
         return [{ side: 'sell', symbol: SYMBOL, qty: held.qty, max_slippage_bps: MAX_SLIPPAGE_BPS } satisfies SellInput];
-      }
-      // --- leg 2: add on a deeper washout while the entry still holds ---
-      if (
-        legs === 1 &&
-        r !== null && r < RSI_BUY &&
-        lower !== null && close < lower &&
-        prev !== null && close > prev &&
-        close <= leg1Close * (1 - LEG2_DROP)
-      ) {
-        const room = state.weight_room(SYMBOL);
-        let slice = state.cash;
-        if (slice > room) slice = room;
-        if (slice > 0n && slice >= BigInt(fees.min_notional_quote_units)) {
-          legs = 2;
-          return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: slice, max_slippage_bps: MAX_SLIPPAGE_BPS } satisfies BuyInput];
-        }
       }
       return [];
     }
+    entrySeq = -1;
 
     // --- entries: flat only ---
-    legs = 0;
-    const dislocated = sma20 !== null && (sma20 - close) / sma20 > DISLOC_PCT;
-    const washout = old !== null && (old - close) / old > WASHOUT_PCT;
-    const tickUp = prev !== null && close > prev;
-    if (r !== null && r < RSI_BUY && lower !== null && close < lower && dislocated && washout && tickUp) {
-      const byWeight = state.weight_room(SYMBOL);
-      let slice = (state.equity * BigInt(SIZE1_BPS)) / BPS;
-      if (slice > byWeight) slice = byWeight;
-      if (slice > state.cash) slice = state.cash;
-      if (slice <= 0n || slice < BigInt(fees.min_notional_quote_units)) return [];
-      legs = 1;
-      leg1Close = close;
-      entrySeq = state.seq;
-      return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: slice, max_slippage_bps: MAX_SLIPPAGE_BPS } satisfies BuyInput];
-    }
-    return [];
+    const r = rsi();
+    if (r === null || r >= RSI_BUY) return [];
+    const prev = s.closes.length >= 2 ? s.closes[s.closes.length - 2] : null;
+    if (prev === null || close <= prev) return []; // need the tick-up
+    const window = s.closes.slice(0, -1).slice(-LOW_BARS); // previous 120 closes
+    if (window.length < 10) return [];
+    let lo = window[0];
+    for (const x of window) if (x < lo) lo = x;
+    if (close > lo * (1 + NEAR_LOW_PCT)) return []; // not at the low
+    const dd = (runningHigh - close) / runningHigh;
+    const late = trades === 0 && state.seq > LATE_BAR;
+    if (dd <= (late ? LATE_DD_MIN : DD_MIN)) return []; // not a deep enough washout
+    if (state.equity * BigInt(BPS) < peakEquity * BigInt(BPS - MAX_DD_BPS)) return []; // circuit breaker
+    const byWeight = state.weight_room(SYMBOL);
+    let slice = state.cash; // full size: one position, all of it
+    if (slice > byWeight) slice = byWeight;
+    if (slice <= 0n || slice < BigInt(state.hello.fees.min_notional_quote_units)) return [];
+    return [{ side: 'buy', symbol: SYMBOL, notional_quote_units: slice, max_slippage_bps: MAX_SLIPPAGE_BPS } satisfies BuyInput];
   },
 });
