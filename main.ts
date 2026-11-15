@@ -111,7 +111,7 @@ await runBars({
     if (!fresh || state.warming_up) return [];
     const { caps, fees } = state.hello;
     const held = state.positions.get(SYMBOL);
-    const close = state.close(SYMBOL);
+    const close = s.last; // latest close as a number (state.close() is a bigint)
     if (close === null) return [];
     const r = rsi();
     const lower = lowerBand();
